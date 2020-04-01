@@ -47,7 +47,7 @@ const store = commit => new Promise((resolve, reject) => {
     const fs = require('fs');
     const compressing = require('compressing');
 
-    const url = `${STORAGE_URL}/resources/${NAME}/${commit}.tar.gz`;
+    const url = `${STORAGE_URL}/resource/${NAME}/${commit}.tar.gz`;
 
     const rs = (() => {
         const stream = new compressing.tgz.Stream();
