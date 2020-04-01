@@ -18,7 +18,13 @@ const fs = require('fs');
 const cfg = { fs, http, dir: SRCDIR, url: URL};
 
 // Connections
-const nc = require('nats').connect(QUEUE_URL, { json: true });
+const nats = require('nats').connect(QUEUE_URL, { json: true });
+
+nats._publish = nats.publish;
+nats.publish = (topic, payload) => {
+    console.log({[topic]: payload});
+    nats._publish(topic, payload);
+};
 
 // Application
 const main = async commit => {
@@ -33,7 +39,6 @@ const main = async commit => {
 
     const updatedCommit = await git.fetch({...cfg, ref: REF}).then(x => x.fetchHead);
     if(commit != updatedCommit) {
-        console.log({commit, updatedCommit});
         await git.checkout({...cfg, ref: updatedCommit});
         store(commit).then(notify(commit));
         return setTimeout(main, POLL_TIMEOUT, updatedCommit);
@@ -47,7 +52,7 @@ const store = commit => new Promise((resolve, reject) => {
     const fs = require('fs');
     const compressing = require('compressing');
 
-    const url = `${STORAGE_URL}/resource/${NAME}/${commit}.tar.gz`;
+    const url = `${STORAGE_URL}/resource/${commit}.tar.gz`;
 
     const rs = (() => {
         const stream = new compressing.tgz.Stream();
@@ -76,9 +81,8 @@ const store = commit => new Promise((resolve, reject) => {
 });
 
 const notify = identifier => url => {
-    console.log({identifier, url});
-    const subject = `${PIPELINE}/resource/${NAME}`;
-    nc.publish(subject, { identifier, url });
+    const subject = `${PIPELINE}.resource.${NAME}`;
+    nats.publish(subject, { identifier, url });
 }
 
 main().catch(err => {
