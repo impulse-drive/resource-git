@@ -1,11 +1,40 @@
 // Configuration
-const POLL_TIMEOUT = process.env.POLL_TIMEOUT || 3000;
-const URL          = process.env.URL          || 'https://github.com/simonvpe/home-manager.git';
-const REF          = process.env.REF          || 'master';
-const PIPELINE     = process.env.PIPELINE     || 'pipeline';
-const NAME         = process.env.NAME         || 'home-manager';
-const STORAGE_URL  = process.env.STORAGE_URL  || 'http://localhost:3000';
-const QUEUE_URL    = process.env.QUEUE_URL    || 'localhost:4444';
+const NAME         = process.env.NAME;
+const POLL_TIMEOUT = process.env.POLL_TIMEOUT;
+const URL          = process.env.URL;
+const REF          = process.env.REF;
+const STORAGE_URL  = process.env.STORAGE_URL;
+const QUEUE_URL    = process.env.QUEUE_URL;
+
+if(!/^pipeline\.[0-9a-zA-Z\-\_]+\.resource\.[0-9a-zA-Z\-\_]+$/.test(NAME)) {
+    console.error(`NAME=${NAME}: bad name`);
+    process.exit(1);
+}
+
+if(!/^\+?(0|[1-9]\d*)$/.test(POLL_TIMEOUT)) {
+    console.error(`POLL_TIMEOUT=${POLL_TIMEOUT}: not a normal number`);
+    process.exit(1);
+}
+
+if(!URL) {
+    console.error(`URL=${URL}`);
+    process.exit(1);
+}
+
+if(!REF) {
+    console.error(`REF=${REF}`);
+    process.exit(1);
+}
+
+if(!STORAGE_URL) {
+    console.error(`STORAGE_URL=${STORAGE_URL}`);
+    process.exit(1);
+}
+
+if(!QUEUE_URL) {
+    console.error(`QUEUE_URL=${QUEUE_URL}`);
+    process.exit(1);
+}
 
 // Constants
 const SRCDIR = '/tmp/source';
@@ -81,8 +110,7 @@ const store = commit => new Promise((resolve, reject) => {
 });
 
 const notify = identifier => url => {
-    const subject = `${PIPELINE}.resource.${NAME}`;
-    nats.publish(subject, { identifier, url });
+    nats.publish(NAME, { identifier, url });
 }
 
 main().catch(err => {
