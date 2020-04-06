@@ -1,117 +1,110 @@
-// Configuration
-const NAME         = process.env.NAME;
-const POLL_TIMEOUT = process.env.POLL_TIMEOUT;
-const URL          = process.env.URL;
-const REF          = process.env.REF;
-const STORAGE_URL  = process.env.STORAGE_URL;
-const QUEUE_URL    = process.env.QUEUE_URL;
-
-if(!/^pipeline\.[0-9a-zA-Z\-\_]+\.resource\.[0-9a-zA-Z\-\_]+$/.test(NAME)) {
-    console.error(`NAME=${NAME}: bad name`);
-    process.exit(1);
-}
-
-if(!/^\+?(0|[1-9]\d*)$/.test(POLL_TIMEOUT)) {
-    console.error(`POLL_TIMEOUT=${POLL_TIMEOUT}: not a normal number`);
-    process.exit(1);
-}
-
-if(!URL) {
-    console.error(`URL=${URL}`);
-    process.exit(1);
-}
-
-if(!REF) {
-    console.error(`REF=${REF}`);
-    process.exit(1);
-}
-
-if(!STORAGE_URL) {
-    console.error(`STORAGE_URL=${STORAGE_URL}`);
-    process.exit(1);
-}
-
-if(!QUEUE_URL) {
-    console.error(`QUEUE_URL=${QUEUE_URL}`);
-    process.exit(1);
-}
-
-// Constants
-const SRCDIR = '/tmp/source';
-
-const path = require('path');
+const cfg = require('./config');
+const compressing = require('compressing');
+const fs = require('fs');
 const git = require('isomorphic-git');
 const http = require('isomorphic-git/http/node');
-const fs = require('fs');
 
-const cfg = { fs, http, dir: SRCDIR, url: URL};
+const nats = (() => {
+    const nats = require('nats').connect(cfg.queue.url, { json: true });
+    nats._publish = nats.publish;
+    nats.publish = (topic, payload) => {
+        console.log({[topic]: payload});
+        nats._publish(topic, payload);
+    };
+    return nats;
+})();
 
-// Connections
-const nats = require('nats').connect(QUEUE_URL, { json: true });
+const minio = (() => {
+    const Minio= require('minio');
+    const client = new Minio.Client({
+        endPoint: cfg.minio.host,
+        port: cfg.minio.port,
+        useSSL: false,
+        accessKey: cfg.minio.accessKey,
+        secretKey: cfg.minio.secretKey
+    });
+    client.bucketExists(cfg.minio.bucket, (error, exists) => {
+        if(error) {
+            console.error(error);
+            process.exit(1);
+        }
+        if(!exists) {
+            console.log(`creating bucket ${cfg.minio.bucket}`);
+            client.makeBucket(cfg.minio.bucket, (error) => {
+                console.error(error);
+                process.exit(1);
+            });
+        }
+    });
+    return client;
+})();
 
-nats._publish = nats.publish;
-nats.publish = (topic, payload) => {
-    console.log({[topic]: payload});
-    nats._publish(topic, payload);
-};
+const url = commit => `${cfg.storage.url}/resource/${commit}.tar.gz`
 
-// Application
 const main = async commit => {
+    const gitCfg = { fs, http, dir: cfg.srcdir, url: cfg.git.url};
 
     if(!commit) {
-        console.log(`Performing initial clone of ${URL}`);
-        await git.clone({...cfg, ref: REF});
-        commit = await git.resolveRef({...cfg, ref: REF});
-        store(commit).then(notify(commit));
-        return setTimeout(main, POLL_TIMEOUT, commit);
+        console.log(`Performing initial clone of ${cfg.git.url}`);
+        await git.clone({...gitCfg, ref: cfg.git.ref});
+        commit = await git.resolveRef({...gitCfg, ref: cfg.git.ref});
+        await store(commit).then(notify(commit));
+        return setTimeout(main, cfg.git.pollTimeout, commit);
     }
 
-    const updatedCommit = await git.fetch({...cfg, ref: REF}).then(x => x.fetchHead);
+    const updatedCommit = await git.fetch({...gitCfg, ref: cfg.git.ref}).then(x => x.fetchHead);
+
+    if(commit === updatedCommit) {
+        console.log(`commit ${commit} unchanged`);
+        await store(commit).then(notify(commit));
+        return setTimeout(main, cfg.git.pollTimeout, commit);
+    }
+
+    console.log(`${commit} != ${updatedCommit}`);
     if(commit != updatedCommit) {
-        await git.checkout({...cfg, ref: updatedCommit});
-        store(commit).then(notify(commit));
-        return setTimeout(main, POLL_TIMEOUT, updatedCommit);
+        console.log(`commit ${commit} => ${updatedCommit}`);
+        await git.checkout({...gitCfg, ref: updatedCommit});
+        await store(commit).then(notify(commit));
+        return setTimeout(main, cfg.git.pollTimeout, updatedCommit);
     }
 
-    return setTimeout(main, POLL_TIMEOUT, commit);
+}
+
+const notify = identifier => msg => {
+    nats.publish(cfg.name, { identifier, ...msg });
 }
 
 const store = commit => new Promise((resolve, reject) => {
-    const request = require('request');
-    const fs = require('fs');
-    const compressing = require('compressing');
+    const bucket = cfg.minio.bucket;
+    const object = `${commit}.tgz`;
 
-    const url = `${STORAGE_URL}/resource/${commit}.tar.gz`;
+    minio.statObject(cfg.minio.bucket, object, (error) => {
+        if(error && error.code == 'NotFound') {
+            const stream = (() => {
+                const stream = new compressing.tgz.Stream();
+                stream.addEntry(cfg.srcdir, { ignoreBase: true });
+                return stream;
+            })();
 
-    const rs = (() => {
-        const stream = new compressing.tgz.Stream();
-        stream.addEntry(SRCDIR, { ignoreBase: true });
-        return stream;
-    })();
-
-    const ws = request.post(url);
-
-    ws.on('drain', () => {
-        rs.resume();
-    });
-
-    ws.on('error', err => {
-        reject(err);
-    });
-
-    ws.on('response', res => {
-        if(res.statusCode != 200) {
-            reject(res.statusCode);
+            return minio.putObject(cfg.minio.bucket, object, stream, (error, etag) => {
+                if(error) {
+                    return reject(error);
+                }
+                return resolve({ bucket, object });
+            });
         }
-        resolve(url);
-    })
 
-    rs.pipe(ws);
+        if(error) {
+            return reject(error);
+        }
+
+        return resolve({ bucket, object });
+    });
+
+    return { bucket: cfg.minio.bucket, object };
+
 });
 
-const notify = identifier => url => {
-    nats.publish(NAME, { identifier, url });
-}
 
 main().catch(err => {
     console.log(err);
